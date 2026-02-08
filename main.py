@@ -1,4 +1,8 @@
-     
+import os
+import json  
+import uuid   
+from datetime import datetime
+
 def collect_status(state, motor_on, motor_on2, counter, next_section_available, n1):
     return{
         "state":state,
@@ -59,10 +63,6 @@ def handle_tick(state, counter, motor_on, motor_on2, n1):
         
     return state, counter, motor_on, motor_on2, n1, message
 
-import os
-import json
-from datetime import datetime
-
 def log_event(command, message, status, enabled=True):
     if not enabled:
         return
@@ -80,9 +80,7 @@ def log_event(command, message, status, enabled=True):
 
     with open(filepath, "a", encoding="utf-8") as f:
         f.write(json.dumps(event, ensure_ascii=False) + "\n")
-
-import uuid
-
+    
 counter = 0
 motor_on = False
 motor_on2 = False
@@ -101,8 +99,6 @@ if auto_clear_log_on_start:
     
 print("LineCheck Simulator started")
 print("Type 'clearlog','s1', 's2', 'next', 'next_section_available', 'n1', 'tick', 'log', 'reset' or 'exit'")
-
-
 
 while True:
     message=""
@@ -123,9 +119,7 @@ while True:
         message= f"Logging = {logging_enabled}"
         
     elif command == "clearlog":
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        filepath = os.path.join(base_dir, "events.jsonl")
-        open(filepath, "w", encoding="utf-8").close()
+        clear_log_file()
         message = "Log cleared"
         
     elif command == "reset":
