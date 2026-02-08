@@ -1,12 +1,29 @@
-def print_status(message, state, motor_on, motor_on2, counter):
+     
+def collect_status(state, motor_on, motor_on2, counter, next_section_available, n1):
+    return{
+        "state":state,
+        "motor_on":motor_on,
+        "motor_on2":motor_on2,
+        "counter":counter,
+        "next_section_available":next_section_available,
+        "next_sensor":n1
+    }
+
+def print_status(message, status):
     print(message)
-    print(f"Current state: {state}")
-    print(f"Motor: {'ON' if motor_on else 'OFF'}")
-    print(f"Counter: {counter}")
-    print(f"Motor_next_link: {'ON' if motor_on2 else 'OFF'}")
+    print(f"Current state: {status['state']}")
+    print(f"Motor: {'ON' if status['motor_on'] else 'OFF'}")
+    print(f"Motor_next_link: {'ON' if status['motor_on2'] else 'OFF'}")
+    print(f"Counter: {status['counter']}")
+    print(f"Next section available:{status['next_section_available']}")
+    
+def clear_log_file():
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    filepath = os.path.join(base_dir, "events.jsonl")
+    open(filepath, "w", encoding="utf-8").close()
 
 # Our trying to simple the code
-# Order: state, counter, motor_on, motor_on2, n1, next_free
+# Order: state, counter, motor_on, motor_on2, n1
 
 def reset_system(): 
     return "WAIT_EMPTY", 0, False, False, False
@@ -27,32 +44,68 @@ def handle_tick(state, counter, motor_on, motor_on2, n1):
         message = "Tick: next section moving, now start current section motor"
         motor_on = True
         state = "TRANSFER"
+        counter = 0
         
     elif state == "TRANSFER":
+        counter += 1
+        
         if n1:
             message = "Transfer completed: N1 confirmed"
             return "WAIT_EMPTY", 0, False, False, False, message
-        else: 
-            message="Transfer in progress: waiting for N1"
+        if counter >=4:
+            message = "ERROR: no N1 confirmation (timeout) -> auto reset"
+            return "WAIT_EMPTY", 0, False, False, False, message
+        message = "Transfer in progress: waiting for N1"
+        
     return state, counter, motor_on, motor_on2, n1, message
 
+import os
+import json
+from datetime import datetime
+
+def log_event(command, message, status, enabled=True):
+    if not enabled:
+        return
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    filepath = os.path.join(base_dir, "events.jsonl")
+
+    event = {
+        "run_id": run_id,
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "command": command,
+        "message": message,
+        "status": status
+    }
+
+    with open(filepath, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+import uuid
 
 counter = 0
 motor_on = False
 motor_on2 = False
 next_section_available = True
 n1 = False
+logging_enabled = True
+run_id = uuid.uuid4().hex[:8]
+auto_clear_log_on_start = False
 
 message = ""
 should_exit = False
 state = "WAIT_EMPTY"
 
+if auto_clear_log_on_start:
+    clear_log_file()
+    
 print("LineCheck Simulator started")
-print("Type 's1', 's2', 'next', 'next_section_available', 'n1', 'tick', 'reset' or 'exit'")
+print("Type 'clearlog','s1', 's2', 'next', 'next_section_available', 'n1', 'tick', 'log', 'reset' or 'exit'")
 
 
 
 while True:
+    message=""
     command = input("> ").strip().lower()
     
     if state == "ERROR" and command not in ("reset", "exit"):
@@ -64,9 +117,19 @@ while True:
     if command == "exit":
         message="Simulation stopped by user"
         should_exit = True
+    
+    elif command == "log":
+        logging_enabled = not logging_enabled
+        message= f"Logging = {logging_enabled}"
+        
+    elif command == "clearlog":
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        filepath = os.path.join(base_dir, "events.jsonl")
+        open(filepath, "w", encoding="utf-8").close()
+        message = "Log cleared"
         
     elif command == "reset":
-        state, counter, motor_on, motor_on2, n1, = reset_system()
+        state, counter, motor_on, motor_on2, n1 = reset_system()
         next_section_available = True
         message = "Manual reset: system returned to WAIT_EMPTY"
         
@@ -113,12 +176,16 @@ while True:
         state, counter, motor_on, motor_on2, n1, message = handle_tick(
             state, counter, motor_on, motor_on2, n1
         )
-        
+        n1 = False
+    
     else:
         message="Unknown command"
     
-   
-    print_status(message, state, motor_on, motor_on2, counter)
+    status = collect_status(state, motor_on, motor_on2, counter, next_section_available, n1)
+    print_status(message, status)
+    
+
+    log_event(command, message, status, enabled = logging_enabled)
   
     if should_exit:
         break
