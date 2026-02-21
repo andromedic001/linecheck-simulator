@@ -7,139 +7,51 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE = os.path.join(BASE_DIR, "events.jsonl")
 
 
-def collect_status(state, motor_on, motor_on2, counter, next_section_available, n1,
-                   align_stopper, aligned, clamp):
+# ---------- state ----------
+def reset_system() -> dict:
+    # Single source of truth: whole system state in one dict
     return {
-        "state": state,
-        "motor_on": motor_on,
-        "motor_on2": motor_on2,
-        "counter": counter,
-        "next_section_available": next_section_available,
-        "next_sensor": n1,
-        "align_stopper": align_stopper,
-        "aligned": aligned,
-        "clamping": clamp
+        "state": "WAIT_EMPTY",
+        "counter": 0,
+        "entry_present": False,
+        "at_end_present": False,
+        "next_free":True,
+        "station_clear": True,
+        "completed_count": 0,
+        "motor_on": False,
+        "motor_on2": False,
+        "n1": False,
+        "align_stopper": False,
+        "aligned": False,     # meaning: aligned by stopper (longitudinal)
+        "clamp": False,       # meaning: clamping process active
+        "clamped": False      # meaning: clamp finished / holding
     }
 
 
-def print_status(message, status):
+# ---------- helpers ----------
+def print_status(message: str, st: dict) -> None:
     print(message)
-    print(f"Current state: {status['state']}")
-    print(f"Motor: {'ON' if status['motor_on'] else 'OFF'}")
-    print(f"Motor_next_link: {'ON' if status['motor_on2'] else 'OFF'}")
-    print(f"Counter: {status['counter']}")
-    print(f"Next section: {'FREE' if status['next_section_available'] else 'BLOCKED'}")
-    print(f"Alignator: {'STUCK OUT' if status['align_stopper'] else 'STUCK IN'}")
-    print(f"Radiator aligned: {'YES' if status['aligned'] else 'NO'}")
-    print(f"Clamped: {'YES' if status['clamping'] else 'NO'}")
+    print(f"At entry: {'YES' if st['entry_present'] else 'NO'}")
+    print(f"At end position: {'YES' if st['at_end_present'] else 'NO'}")
+    print(f"Station clear: {'YES' if st['station_clear'] else 'NO'}")
+    print(f"Next section: {'FREE' if st['next_free'] else 'BLOCKED'}")
+    print(f"Current state: {st['state']}")
+    print(f"Motor: {'ON' if st['motor_on'] else 'OFF'}")
+    print(f"Motor_next_link: {'ON' if st['motor_on2'] else 'OFF'}")
+    print(f"Counter: {st['counter']}")
+    print(f"Alignator: {'STUCK OUT' if st['align_stopper'] else 'STUCK IN'}")
+    print(f"Radiator aligned: {'YES' if st['aligned'] else 'NO'}")
+    print(f"Clamping: {'YES' if st['clamp'] else 'NO'}")
+    print(f"Clamped: {'YES' if st['clamped'] else 'NO'}")
 
 
-def clear_log_file():
+def clear_log_file() -> None:
     open(LOG_FILE, "w", encoding="utf-8").close()
 
 
-def reset_system():
-    # state, counter, motor_on, motor_on2, n1, next_section_available, align_stopper, aligned, clamp
-    return "WAIT_EMPTY", 0, False, False, False, True, False, False, False
-
-
-def handle_tick(state, counter, motor_on, motor_on2, n1, next_section_available,
-                align_stopper, aligned, clamp):
-    """
-    Always returns 11 values:
-    state, counter, motor_on, motor_on2, n1, next_section_available,
-    align_stopper, aligned, clamp, message, error_code
-    """
-    message = "Tick ignored (not moving)"
-    error_code = None
-
-    if state == "MOVE_TO_S2":
-        motor_on = True
-        counter += 1
-        message = "Tick: moving to S2..."
-
-        if counter >= 4:
-            message = "ERROR: no S2 confirmation (timeout) -> auto reset"
-            error_code = "E_S2_TIMEOUT"
-            state, counter, motor_on, motor_on2, n1, next_section_available, align_stopper, aligned, clamp = reset_system()
-
-    elif state == "PREP_TRANSFER":
-        # motor_on2 already ON, align_stopper already OUT (set on 'next')
-        message = "Tick: next section moving, start current motor -> TRANSFER"
-        motor_on = True
-        state = "TRANSFER"
-        counter = 0
-
-    elif state == "TRANSFER":
-        counter += 1
-
-        # N1 interrupt: we DO NOT finish instantly.
-        # We enter ALIGNING for exactly 1 tick so radiator "hits stopper".
-        if n1:
-            message = "N1 confirmed: keep pushing for 1 tick to hit stopper (ALIGNING)"
-            next_section_available = False   # next section occupied
-            # In transfer, next motor is already ON. Keep it ON for the impact tick.
-            motor_on = False                 # current motor stops once radiator reached next sensor
-            motor_on2 = True                 # keep pushing into stopper for one more tick
-            state = "ALIGNING"
-            counter = 0
-            n1 = False
-        elif counter >= 4:
-            message = "ERROR: no N1 confirmation (timeout) -> auto reset"
-            error_code = "E_N1_TIMEOUT"
-            state, counter, motor_on, motor_on2, n1, next_section_available, align_stopper, aligned, clamp = reset_system()
-        else:
-            message = "Transfer in progress: waiting for N1"
-
-    elif state == "ALIGNING":
-        # Exactly 1 tick: radiator hits stopper, then we stop next motor and retract stopper.
-        counter += 1
-        message = "ALIGNING: radiator hit stopper -> stop next motor, retract stopper, wait clamp"
-
-        if counter >= 1:
-            motor_on2 = False
-            align_stopper = False
-            state = "WAIT_CLAMP"
-            counter = 0
-
-    elif state == "WAIT_CLAMP":
-        message = "Waiting clamp command (manual manipulator)"
-
-    elif state == "CLAMPING":
-        counter += 1
-        message = "Clamping in progress..."
-
-        if counter >= 2:
-            aligned = True
-            clamp = True
-            # After clamp alignment, start discharge
-            motor_on2 = True
-            state = "DISCHARGE"
-            counter = 0
-            message = "Aligned by clamp -> DISCHARGE (next motor moves radiator away)"
-
-    elif state == "DISCHARGE":
-        counter += 1
-        message = "Discharging radiator..."
-
-        if counter >= 2:
-            motor_on2 = False
-            clamp = False
-            aligned = False
-            next_section_available = True
-            state = "DONE"
-            counter = 0
-            message = "Radiator discharged. Simulation finished."
-
-    elif state == "DONE":
-        message = "DONE"
-
-    return (state, counter, motor_on, motor_on2, n1, next_section_available,
-            align_stopper, aligned, clamp, message, error_code)
-
-
-def log_event(command, message, status, event_type=None, level="INFO", error_code=None,
-              enabled=True, run_id=""):
+def log_event(run_id: str, command: str, message: str, st: dict,
+              event_type: str = "command", level: str = "INFO",
+              error_code: str | None = None, enabled: bool = True) -> None:
     if not enabled:
         return
 
@@ -147,12 +59,12 @@ def log_event(command, message, status, event_type=None, level="INFO", error_cod
         "run_id": run_id,
         "ts": datetime.now().isoformat(timespec="seconds"),
         "command": command,
-        "event_type": event_type or command,
+        "event_type": event_type,
         "level": level,
         "error_code": error_code,
         "message": message,
-        "state": status.get("state"),
-        "status": status
+        "state": st.get("state"),
+        "status": st  # snapshot
     }
 
     try:
@@ -162,9 +74,121 @@ def log_event(command, message, status, event_type=None, level="INFO", error_cod
         print(f"[LOG ERROR] {e}")
 
 
+# ---------- core FSM ----------
+def handle_tick(st: dict) -> tuple[str, str | None]:
+    """
+    Tick-based FSM transition.
+
+    Mutates st in-place.
+    Returns:
+        message (str), error_code (str|None)
+    """
+    message = "Tick ignored (not moving)"
+    error_code = None
+
+    state = st["state"]
+
+    if state == "MOVE_TO_S2":
+        st["motor_on"] = True
+        st["counter"] += 1
+        message = "Tick: moving to S2..."
+
+        if st["counter"] >= 4:
+            message = "ERROR: no S2 confirmation (timeout) -> auto reset"
+            error_code = "E_S2_TIMEOUT"
+            st.clear()
+            st.update(reset_system())
+
+    elif state == "PREP_TRANSFER":
+        message = "Tick: next section moving, start current section motor -> TRANSFER"
+        st ["station_clear"] = False
+        st["motor_on"] = True
+        st["state"] = "TRANSFER"
+        st["counter"] = 0
+        st["at_end_present"] = False
+    elif state == "TRANSFER":
+        st["counter"] += 1
+        
+        
+        if st["n1"]:
+            message = "N1 confirmed: hit stopper, waiting clamp"
+            st["next_free"] = False
+            st["motor_on"] = False
+            st["motor_on2"] = True   # push into stopper for ALIGNING phase
+            st["state"] = "ALIGNING"
+            st["counter"] = 0
+            st["n1"] = False
+
+        elif st["counter"] >= 4:
+            message = "ERROR: no N1 confirmation (timeout) -> auto reset"
+            error_code = "E_N1_TIMEOUT"
+            st.clear()
+            st.update(reset_system())
+        else:
+            message = "Transfer in progress: waiting for N1"
+
+    elif state == "ALIGNING":
+        st["counter"] += 1
+        message = "Aligning in progress..."
+
+        # You chose 1 tick for impact
+        if st["counter"] >= 1:
+            st["motor_on"] = False
+            st["motor_on2"] = False
+            st["aligned"] = True
+            st["align_stopper"] = False
+            st["state"] = "WAIT_CLAMP"
+            st["counter"] = 0
+            message = "Radiator is aligned (stopper). Waiting clamp."
+
+    elif state == "WAIT_CLAMP":
+        # do nothing on tick
+        message = "Waiting clamp command (manual manipulator)"
+
+    elif state == "CLAMPING":
+        st["counter"] += 1
+        st["clamp"] = True
+        message = "Clamping in progress..."
+
+        if st["counter"] >= 2:
+            st["clamped"] = True
+            st["clamp"] = False
+            
+            # Start discharge: next motor moves radiator away
+            st["motor_on"] = False
+            st["motor_on2"] = True
+            st["state"] = "DISCHARGE"
+            st["counter"] = 0
+            message = "Clamp finished -> DISCHARGE (next motor moves radiator away)"
+
+    elif state == "DISCHARGE":
+        st["counter"] += 1
+        message = "Discharging radiator..."
+
+        if st["counter"] >= 2:
+            st ["station_clear"] = True
+            st["motor_on2"] = False
+            st["clamp"] = False
+            st["clamped"] = False
+            st["align_stopper"] = False
+            st["aligned"] = False
+            st["next_free"] = True
+            st["state"] = "DONE"
+            st["counter"] = 0
+            st["completed_count"] += 1
+            message = "Radiator discharged. Simulation finished."
+
+    elif state == "DONE":
+        message = "DONE"
+
+    return message, error_code
+
+
+# ---------- main ----------
 def main():
     run_id = uuid.uuid4().hex[:8]
-    state, counter, motor_on, motor_on2, n1, next_section_available, align_stopper, aligned, clamp = reset_system()
+    st = reset_system()
+
     logging_enabled = True
     auto_clear_log_on_start = False
 
@@ -172,18 +196,18 @@ def main():
         clear_log_file()
 
     print("LineCheck Simulator started")
-    print("Commands: s1, s2, next, n1, tick, clamp, next_section_toggle, reset, clearlog, log, exit")
+    print("Commands: s1, s2, next, n1, tick, clamp, reset, clearlog, log, exit")
 
     should_exit = False
 
     while True:
-        if state == "DONE":
+        if st["state"] == "DONE":
             print("Simulation finished.")
             break
 
+        command = input("> ").strip().lower()
         message = ""
         error_code = None
-        command = input("> ").strip().lower()
 
         if command == "exit":
             message = "Simulation stopped by user"
@@ -198,75 +222,82 @@ def main():
             message = "Log cleared"
 
         elif command == "reset":
-            state, counter, motor_on, motor_on2, n1, next_section_available, align_stopper, aligned, clamp = reset_system()
+            st.clear()
+            st.update(reset_system())
             message = "Manual reset: system returned to WAIT_EMPTY"
 
-        elif command == "next_section_toggle":
-            next_section_available = not next_section_available
-            message = f"Next section toggled -> {'FREE' if next_section_available else 'BLOCKED'}"
-
         elif command == "s1":
-            counter = 1
-            motor_on = True
-            motor_on2 = False
-            n1 = False
+            st["entry_present"] = True
+            st["counter"] = 1
+            st["motor_on"] = True
+            st["motor_on2"] = False
+            st["n1"] = False
             message = "S1 triggered (radiator detected at entry)"
-            state = "MOVE_TO_S2"
+            
+            st["state"] = "MOVE_TO_S2"
 
         elif command == "s2":
-            motor_on = False
-            motor_on2 = False
-            counter = 0
-            message = "S2 triggered (radiator at end position)" if state != "WAIT_EMPTY" else "Manual load at S2"
-            state = "AT_END"
+            st["entry_present"] = False
+            st["at_end_present"] = True
+            st["motor_on"] = False
+            st["motor_on2"] = False
+            st["counter"] = 0
+            message = ("Manual load at S2 (radiator placed manually)" 
+            if st["state"] == "WAIT_EMPTY" else "S2 triggered (radiator at end position)")
+            
+            st["state"] = "AT_END"
+            
 
         elif command == "next":
-            if state == "AT_END":
-                if next_section_available:
-                    message = "Preparing transfer: next motor ON + align stopper OUT"
-                    state = "PREP_TRANSFER"
-                    motor_on2 = True
-                    align_stopper = True
-                else:
-                    message = "Next section blocked"
-                    motor_on2 = False
-            else:
+            if not st["at_end_present"]:
                 message = "Cannot transfer: radiator is not at end position"
+                st["motor_on2"] = False
 
+            elif not st["station_clear"]:
+                message = "Cannot transfer: station is busy"
+                st["motor_on2"] = False
+
+            elif not st["next_free"]:
+                message = "Next section blocked"
+                st["motor_on2"] = False
+
+            else:
+                message = "Preparing transfer: starting next section motor + align stopper OUT"
+                st["state"] = "PREP_TRANSFER"
+                st["motor_on2"] = True
+                st["align_stopper"] = True
+                
+                
         elif command == "n1":
-            n1 = True
+            st["n1"] = True
             message = "N1 triggered (radiator detected on next section)"
-            # interrupt-style: process immediately if in TRANSFER
-            if state == "TRANSFER":
-                (state, counter, motor_on, motor_on2, n1, next_section_available,
-                 align_stopper, aligned, clamp, message, error_code) = handle_tick(
-                    state, counter, motor_on, motor_on2, n1, next_section_available,
-                    align_stopper, aligned, clamp
-                )
+
+            # interrupt-style: if in TRANSFER, handle immediately without extra tick
+            if st["state"] == "TRANSFER":
+                message, error_code = handle_tick(st)
 
         elif command == "clamp":
-            if state == "WAIT_CLAMP":
-                clamp = True
-                state = "CLAMPING"
-                counter = 0
+            if st["state"] == "WAIT_CLAMP":
+                st["state"] = "CLAMPING"
+                st["counter"] = 0
+                st["clamp"] = True
+                st["clamped"] = False
+                # safety: motors off while manipulator starts
+                st["motor_on"] = False
+                st["motor_on2"] = False
                 message = "Clamp command accepted: manipulator started"
             else:
                 message = "Clamp not allowed in this state"
 
         elif command == "tick":
-            (state, counter, motor_on, motor_on2, n1, next_section_available,
-             align_stopper, aligned, clamp, message, error_code) = handle_tick(
-                state, counter, motor_on, motor_on2, n1, next_section_available,
-                align_stopper, aligned, clamp
-            )
+            message, error_code = handle_tick(st)
 
         else:
             message = "Unknown command"
 
-        status = collect_status(state, motor_on, motor_on2, counter, next_section_available,
-                                n1, align_stopper, aligned, clamp)
-        print_status(message, status)
+        print_status(message, st)
 
+        # event classification
         event_type = "command"
         level = "INFO"
         if error_code:
@@ -281,8 +312,8 @@ def main():
         elif command == "clamp":
             event_type = "actuator"
 
-        log_event(command, message, status, event_type=event_type, level=level,
-                  error_code=error_code, enabled=logging_enabled, run_id=run_id)
+        log_event(run_id, command, message, st, event_type=event_type, level=level,
+                  error_code=error_code, enabled=logging_enabled)
 
         if should_exit:
             print("Simulation finished.")
