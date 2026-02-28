@@ -17,24 +17,26 @@ def reset_system() -> dict:
         "at_end_present": False,
         "next_free":True,
         "station_clear": True,
-        "completed_count": 0,
         "motor_on": False,
         "motor_on2": False,
+        "completed_count": 0,
         "n1": False,
         "align_stopper": False,
         "aligned": False,     # meaning: aligned by stopper (longitudinal)
         "clamp": False,       # meaning: clamping process active
-        "clamped": False      # meaning: clamp finished / holding
+        "clamped": False, # meaning: clamp finished / holding
+        "error_code": None,
+        "error_msg": "",
     }
 
 
 # ---------- helpers ----------
 def print_status(message: str, st: dict) -> None:
     print(message)
-    print(f"At entry: {'YES' if st['entry_present'] else 'NO'}")
-    print(f"At end position: {'YES' if st['at_end_present'] else 'NO'}")
-    print(f"Station clear: {'YES' if st['station_clear'] else 'NO'}")
-    print(f"Next section: {'FREE' if st['next_free'] else 'BLOCKED'}")
+    #print(f"At entry: {'YES' if st['entry_present'] else 'NO'}")
+    #print(f"At end position: {'YES' if st['at_end_present'] else 'NO'}")
+    #print(f"Station clear: {'YES' if st['station_clear'] else 'NO'}")
+    #print(f"Next section: {'FREE' if st['next_free'] else 'BLOCKED'}")
     print(f"Current state: {st['state']}")
     print(f"Motor: {'ON' if st['motor_on'] else 'OFF'}")
     print(f"Motor_next_link: {'ON' if st['motor_on2'] else 'OFF'}")
@@ -48,6 +50,10 @@ def print_status(message: str, st: dict) -> None:
 def clear_log_file() -> None:
     open(LOG_FILE, "w", encoding="utf-8").close()
 
+def deny_transfer(st: dict) -> None:
+    """Safety: cancel any transfer attempt outputs."""
+    st["motor_on2"] = False
+    st["align_stopper"] = False
 
 def log_event(run_id: str, command: str, message: str, st: dict,
               event_type: str = "command", level: str = "INFO",
@@ -96,8 +102,11 @@ def handle_tick(st: dict) -> tuple[str, str | None]:
         if st["counter"] >= 4:
             message = "ERROR: no S2 confirmation (timeout) -> auto reset"
             error_code = "E_S2_TIMEOUT"
+            keep_completed = st.get("completed_count", 0)
             st.clear()
             st.update(reset_system())
+            st["completed_count"] = keep_completed
+            message = "DONE -> reset to WAIT_EMPTY"
 
     elif state == "PREP_TRANSFER":
         message = "Tick: next section moving, start current section motor -> TRANSFER"
@@ -122,8 +131,10 @@ def handle_tick(st: dict) -> tuple[str, str | None]:
         elif st["counter"] >= 4:
             message = "ERROR: no N1 confirmation (timeout) -> auto reset"
             error_code = "E_N1_TIMEOUT"
+            keep_completed = st.get("completed_count", 0)
             st.clear()
             st.update(reset_system())
+            st["completed_count"] = keep_completed
         else:
             message = "Transfer in progress: waiting for N1"
 
@@ -149,8 +160,18 @@ def handle_tick(st: dict) -> tuple[str, str | None]:
         st["counter"] += 1
         st["clamp"] = True
         message = "Clamping in progress..."
-
-        if st["counter"] >= 2:
+        
+        if st["counter"] >= 10:
+            st["state"] = "ERROR"
+            st["motor_on"] = False
+            st["motor_on2"] = False
+            st["clamp"] = False
+            st["error_code"] = "E_CLAMP_TIMEOUT"
+            st["error_msg"] = "Clamp did not finish in time"
+            message = "ERROR: clamp timeout -> manual reset required"
+            return message, "E_CLAMP_TIMEOUT"
+    
+        elif st["counter"] >= 2:
             st["clamped"] = True
             st["clamp"] = False
             
@@ -160,6 +181,8 @@ def handle_tick(st: dict) -> tuple[str, str | None]:
             st["state"] = "DISCHARGE"
             st["counter"] = 0
             message = "Clamp finished -> DISCHARGE (next motor moves radiator away)"
+            
+            
 
     elif state == "DISCHARGE":
         st["counter"] += 1
@@ -177,10 +200,7 @@ def handle_tick(st: dict) -> tuple[str, str | None]:
             st["counter"] = 0
             st["completed_count"] += 1
             message = "Radiator discharged. Simulation finished."
-
-    elif state == "DONE":
-        message = "DONE"
-
+            
     return message, error_code
 
 
@@ -196,20 +216,32 @@ def main():
         clear_log_file()
 
     print("LineCheck Simulator started")
-    print("Commands: s1, s2, next, n1, tick, clamp, reset, clearlog, log, exit")
+    print("Commands: s1, s2, next, n1, tick, clamp, reset, clearcount, clearlog, log, exit")
 
     should_exit = False
 
     while True:
-        if st["state"] == "DONE":
-            print("Simulation finished.")
-            break
-
+        
         command = input("> ").strip().lower()
         message = ""
         error_code = None
+        event_type = "command"
+        level = "INFO"
+        if st["state"] == "ERROR" and command not in ("reset", "exit", "log", "clearlog"):
+            message = "ERROR state: only reset/exit allowed"
+            event_type = "qa"
+            level = "ERROR"
+            error_code = st.get("error_code") or "E_ERROR_LOCK"
 
-        if command == "exit":
+            st["motor_on"] = False
+            st["motor_on2"] = False
+
+            print_status(message, st)
+            log_event(run_id, command, message, st, event_type=event_type, level=level,
+                    error_code=error_code, enabled=logging_enabled)
+            continue
+        
+        elif command == "exit":
             message = "Simulation stopped by user"
             should_exit = True
 
@@ -222,8 +254,10 @@ def main():
             message = "Log cleared"
 
         elif command == "reset":
+            keep_completed = st.get("completed_count", 0)
             st.clear()
             st.update(reset_system())
+            st["completed_count"] = keep_completed
             message = "Manual reset: system returned to WAIT_EMPTY"
 
         elif command == "s1":
@@ -249,18 +283,31 @@ def main():
             
 
         elif command == "next":
+            event_type = "controller"
+            level = "INFO"
+            error_code = None
+            
             if not st["at_end_present"]:
                 message = "Cannot transfer: radiator is not at end position"
-                st["motor_on2"] = False
-
+                level = "WARN"
+                error_code = "E_NO_PART_AT_END"
+                event_type="interlock"
+                deny_transfer(st)
+                
             elif not st["station_clear"]:
                 message = "Cannot transfer: station is busy"
-                st["motor_on2"] = False
-
+                level = "WARN"
+                error_code = "E_STATION_BUSY"
+                event_type="interlock"
+                deny_transfer(st)
+                
             elif not st["next_free"]:
                 message = "Next section blocked"
-                st["motor_on2"] = False
-
+                level = "WARN"
+                error_code = "E_NEXT_BLOCKED"
+                event_type="interlock"
+                deny_transfer(st)
+                
             else:
                 message = "Preparing transfer: starting next section motor + align stopper OUT"
                 st["state"] = "PREP_TRANSFER"
@@ -269,14 +316,25 @@ def main():
                 
                 
         elif command == "n1":
-            st["n1"] = True
-            message = "N1 triggered (radiator detected on next section)"
-
-            # interrupt-style: if in TRANSFER, handle immediately without extra tick
-            if st["state"] == "TRANSFER":
+            event_type = "sensor"
+            error_code = None
+            
+            if st["state"] != "TRANSFER":
+                message = "N1 ignored: no transfer in progress"
+                level = "WARN"
+                error_code = "E_N1_UNEXPECTED"
+                st["n1"]= False
+            
+            else:
+                st["n1"] = True
+                level = "INFO"
+                message = "N1 triggered (evaporator detected on next section)"
                 message, error_code = handle_tick(st)
 
         elif command == "clamp":
+            event_type = "actuator"
+            error_code = None
+            
             if st["state"] == "WAIT_CLAMP":
                 st["state"] = "CLAMPING"
                 st["counter"] = 0
@@ -286,35 +344,54 @@ def main():
                 st["motor_on"] = False
                 st["motor_on2"] = False
                 message = "Clamp command accepted: manipulator started"
+                level = "INFO"
+                
             else:
                 message = "Clamp not allowed in this state"
+                level = "WARN"
+                error_code = "E_INVALID_STATE"
 
         elif command == "tick":
             message, error_code = handle_tick(st)
-
+            
+            if st["state"] == "DONE":
+                
+                keep_completed = st.get("completed_count", 0)
+                st.clear()
+                st.update(reset_system())
+                st["completed_count"] = keep_completed
+                message = "DONE -> reset to WAIT_EMPTY"
+                
+        elif command == "clearcount":
+            st["completed_count"] = 0
+            message = "completed_count reset to 0"
+            event_type = "maintenance"    
+                
         else:
             message = "Unknown command"
 
         print_status(message, st)
-
+        
         # event classification
-        event_type = "command"
-        level = "INFO"
-        if error_code:
+        if error_code and level == "ERROR":
             event_type = "timeout"
-            level = "ERROR"
-        elif command in ("s1", "s2", "n1"):
-            event_type = "sensor"
-        elif command in ("next", "tick"):
-            event_type = "controller"
-        elif command in ("reset", "clearlog", "log"):
-            event_type = "maintenance"
-        elif command == "clamp":
-            event_type = "actuator"
-
+            
+        elif event_type == "command":
+            if command in ("s1", "s2", "n1"):
+                event_type = "sensor"
+            elif command in ("next", "tick"):
+                event_type = "controller"
+            elif command in ("reset", "clearlog", "log"):
+                event_type = "maintenance"
+            elif command == "clamp":
+                event_type = "actuator"
+        
+            
         log_event(run_id, command, message, st, event_type=event_type, level=level,
                   error_code=error_code, enabled=logging_enabled)
-
+        
+        
+            
         if should_exit:
             print("Simulation finished.")
             break
