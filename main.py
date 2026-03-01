@@ -110,7 +110,7 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
                 st["motor_on"] = False
                 st["motor_on2"] = False
                 st["counter"] = 0
-                message = "WARN: S2 timeout in line zone -> auto reset to 'MOVE_TO_S2' state (operator may have removed part)"
+                message = "WARN: S2 timeout in line zone -> auto reset to 'WAIT_ENTRY' state (operator may have removed part)"
                 
             elif st["at_end_present"]:
                 st["state"] = "AT_END"
@@ -136,14 +136,14 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
             error_code = None
             
             if not st["at_end_present"]:
-                message = "AT_END mismatch: no part at end sensor"
-                level = "WARN"
-                error_code = "E_STATE_MISMATCH"
-                event_type="QA"
-                keep_completed = st.get("completed_count", 0)
-                st.clear()
-                st.update(reset_system())
-                st["completed_count"] = keep_completed
+                if not st["at_end_present"]:
+                    message = "WARN: AT_END without at_end_present -> forcing WAIT_EMPTY"
+                    level = "WARN"
+                    error_code = "E_STATE_MISMATCH"
+                    event_type = "qa"
+                    st["state"] = "WAIT_EMPTY"
+                    deny_transfer(st)
+                    st["counter"] = 0
                 
             elif not st["station_clear"]:
                 message = "Cannot transfer: station is busy"
@@ -196,7 +196,7 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
                 st["motor_on2"] = False
                 st["n1"] = False
                 st["counter"] = 0
-                message = "WARN: N1 timeout in line zone -> auto reset to 'MOVE_TO_S2' state (operator may have removed part)"
+                message = "WARN: N1 timeout in line zone -> auto reset to 'WAIT_ENTRY' state (operator may have removed part)"
                 
             elif st["at_end_present"]:
                 st["state"] = "AT_END"
@@ -338,7 +338,7 @@ def main():
                 st["state"] = "WAIT_ENTRY"   # new state name only, logic minimal
                 st["motor_on"] = False
                 st["counter"] = 0
-                message = "Manual reset: returning to 'MOVE_TO_S2' state"
+                message = "Manual reset: returning to 'WAIT_ENTRY' state"
                 
             elif st["at_end_present"]:
                 st["state"] = "AT_END"
@@ -432,15 +432,12 @@ def main():
         print_status(message, st)
         
         # event classification
-        if error_code and level == "ERROR" and event_type == "controller":
-            event_type = "timeout"
-            
-        elif event_type == "command":
+        if event_type == "command":
             if command in ("s1", "s2", "n1"):
                 event_type = "sensor"
-            elif command in ("tick"):
+            elif command == "tick":
                 event_type = "controller"
-            elif command in ("reset", "clearlog", "log"):
+            elif command in ("reset", "clearlog", "log", "clearcount"):
                 event_type = "maintenance"
             elif command == "clamp":
                 event_type = "actuator"

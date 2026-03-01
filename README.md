@@ -189,3 +189,9 @@ This simulator attempts to reflect that reality in code.
 
 Author: Andrii Dehtiar
 Project Type: Industrial Logic Simulation / QA Practice
+
+## Roadmap (planned)
+- Remove manual transfer command
+- Add upstream sensor for queue simulation
+- Introduce auto-flow mode (feed-only)
+- Add real-time tick mode
