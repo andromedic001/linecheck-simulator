@@ -11,7 +11,8 @@ LOG_FILE = os.path.join(BASE_DIR, "events.jsonl")
 def reset_system() -> dict:
     # Single source of truth: whole system state in one dict
     return {
-        "state": "WAIT_EMPTY",
+        "state_A": "IDLE",
+        "state_B": "IDLE",
         "S1A": False,
         "S1B": False,
     
@@ -24,7 +25,8 @@ def reset_system() -> dict:
         "motor_u": False,
         "motor_a": False,
         "motor_b": False,
-        "counter": 0, 
+        "counter_A": 0,
+        "counter_B": 0, 
         
         "align_stopper": False,
         "aligned": False,     # meaning: aligned by stopper (longitudinal)
@@ -33,6 +35,11 @@ def reset_system() -> dict:
         
         "error_code": None,
         "error_msg": "",
+        
+        "tick": 0,
+        "auto_run": False, 
+        "flow_mode": "normal", #max / normal / random
+        "next_feed_in": 3,
         "completed_count": 0,
     }
 
@@ -40,6 +47,9 @@ def reset_system() -> dict:
 # ---------- helpers ----------
 def print_status(message: str, st: dict) -> None:
     print(message)
+    print(f"Flow mode: {st['flow_mode']}")
+    print(f"Next feed in: {st['next_feed_in']}")
+    print(f"Auto run: {'ON' if st['auto_run'] else 'OFF'}\n")
     print(f"Section 'U' has a part: {'YES' if st['u_has_part'] else 'NO'}")
     print(f"Section 'A' has a part: {'YES' if st['a_has_part'] else 'NO'}")
     print(f"Section 'A' at end position: {'YES' if st['a_at_end'] else 'NO'}")
@@ -47,14 +57,17 @@ def print_status(message: str, st: dict) -> None:
     print(f"Station clear: {'YES' if st['station_ready'] else 'NO'}\n")
     print(f"Motor_previous_line: {'ON' if st['motor_u'] else 'OFF'}")
     print(f"Motor_current_line: {'ON' if st['motor_a'] else 'OFF'}")
-    print(f"Motor_next_line: {'ON' if st['motor_b'] else 'OFF'}")
-    print(f"Counter: {st['counter']}\n")
+    print(f"Motor_next_line: {'ON' if st['motor_b'] else 'OFF'}\n")
+    print(f"Counter section A: {st['counter_A']}")
+    print(f"Counter section B: {st['counter_B']}\n")
     print(f"Alignator: {'STUCK OUT' if st['align_stopper'] else 'STUCK IN'}")
     print(f"Radiator aligned: {'YES' if st['aligned'] else 'NO'}")
     print(f"Clamping: {'YES' if st['clamp'] else 'NO'}")
     print(f"Clamped: {'YES' if st['clamped'] else 'NO'}\n")
-    print(f"Current state: {st['state']}")
-
+    print(f"Current state section A: {st['state_A']}")
+    print(f"Current state section B: {st['state_B']}")
+    print(f"Global completed count: {st['completed_count']}")
+    print(f"Global tick: {st['tick']}")
 def clear_log_file() -> None:
     open(LOG_FILE, "w", encoding="utf-8").close()
 
@@ -77,7 +90,8 @@ def log_event(run_id: str, command: str, message: str, st: dict,
         "level": level,
         "error_code": error_code,
         "message": message,
-        "state": st.get("state"),
+        "state_A": st.get("state_A"),
+        "state_B": st.get("state_B"),
         "status": st  # snapshot
     }
 
@@ -97,51 +111,49 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
     Returns:
         message (str), error_code (str|None)
     """
-    state = st["state"]
+    state_A = st["state_A"]
+    state_B = st["state_B"]
     message = "Tick ignored (not moving)"
+    st["tick"] += 1
+    
     error_code = None
     level = "INFO"
     event_type = "controller"
     
+    section_A_ready = (not st["a_has_part"]) and (not st["a_at_end"])
+    
     # CASCADE START
-    
-    # A -> B Transfer
-    if st["a_at_end"] and not st["b_has_part"] and st["station_ready"] and st["state"] == "WAIT_EMPTY":
-        message = "Cascade: A at end -> B transfer starting"
-        
-        st["state"] = "PREP_TRANSFER_S1B"
-        
-        return message, None, "INFO", "controller"
-    
+
     # A begin to A end section Transfer
-    elif st["a_has_part"] and not st["a_at_end"] and st["state"] == "WAIT_EMPTY":
+    if (st["a_has_part"] and st["state_A"] == "IDLE"): 
         message = "Cascade A -> A at end transfer starting"
         
-        st["state"] = "MOVE_TO_S2A"
+        st["state_A"] = "MOVE_TO_S2A"
         
         return message, None, "INFO", "controller"
     
     # U -> A Transfer
-    elif st["u_has_part"] and not st["a_has_part"] and not st["a_at_end"] and st["state"] == "WAIT_EMPTY":
+    elif (st["u_has_part"] and section_A_ready 
+        and st["state_A"] == "IDLE"): 
         message = "Cascade: U -> A transfer starting"
         
-        st["state"] = "PREP_TRANSFER_S1A"
+        st["state_A"] = "PREP_TRANSFER_S1A"
         
         return message, None, "INFO", "controller"
     
     
     
     # FINITE STATE MACHINE 
-    elif state == "DISCHARGE":
+    elif st["state_B"] == "DISCHARGE":
         message = "Discharging radiator..."
-        st["counter"] += 1
+        st["counter_B"] += 1
         
 
-        if st["counter"] >= 2:
-            message = "Radiator discharged. Simulation finished."
+        if st["counter_B"] >= 2:
+            message = "Radiator discharged -> system ready for next part."
             
             st["motor_b"] = False
-            st["counter"] = 0
+            st["counter_B"] = 0
             
             st["align_stopper"] = False
             st["aligned"] = False
@@ -152,15 +164,15 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
             st["b_has_part"] = False
 
             st["completed_count"] += 1  
-            st["state"] = "DONE" 
+            st["state_B"] = "IDLE" 
             
-    elif state == "CLAMPING":
+    elif st["state_B"] == "CLAMPING":
         message = "Clamping in progress..."
         
-        st["counter"] += 1
+        st["counter_B"] += 1
         st["clamp"] = True
 
-        if st["counter"] >= 10:
+        if st["counter_B"] >= 10:
             message = "ERROR: clamp timeout -> manual reset required"
             st["error_msg"] = "Clamp did not finish in time"
             
@@ -173,51 +185,51 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
             level = "ERROR"
             event_type = "manual_reset"
             
-            st["state"] = "ERROR"
+            st["state_B"] = "ERROR"
             return message, "E_CLAMP_TIMEOUT", level, event_type
     
-        elif st["counter"] >= 2:
+        elif st["counter_B"] >= 2:
             message = "Clamp finished -> DISCHARGE (next motor moves radiator away)"
             
             st["motor_a"] = False
             st["motor_b"] = True 
-            st["counter"] = 0
+            st["counter_B"] = 0
             
             st["clamped"] = True
             st["clamp"] = False
             
-            st["state"] = "DISCHARGE"
+            st["state_B"] = "DISCHARGE"
             
-    elif state == "WAIT_CLAMP":
+    elif st["state_B"] == "WAIT_CLAMP":
         message = "Auto clamp start"
         
         st["clamp"] = True
         st["clamped"] = False
-        st["counter"] = 0
+        st["counter_B"] = 0
         
-        st["state"] = "CLAMPING"
+        st["state_B"] = "CLAMPING"
         
-    elif state == "ALIGNING":
-        st["counter"] += 1
+    elif st["state_B"] == "ALIGNING":
+        st["counter_B"] += 1
         message = "Aligning in progress..."
 
         # You chose 1 tick for impact
-        if st["counter"] >= 1:
+        if st["counter_B"] >= 1:
             message = "Radiator is aligned (stopper)"
             
             st["motor_a"] = False
             st["motor_b"] = False
-            st["counter"] = 0
+            st["counter_B"] = 0
             
             st["aligned"] = True
             st["align_stopper"] = False
             
-            st["state"] = "WAIT_CLAMP"
+            st["state_B"] = "WAIT_CLAMP"
     
-    elif state == "TRANSFER_S1B":
+    elif st["state_B"] == "TRANSFER_S1B":
         message = "Transfer in progress: moving A -> B"
         
-        st["counter"] += 1
+        st["counter_B"] += 1
         
         if st["S1B"]:
             message = "S1B confirmed: hit stopper, pushing a part into align stopper (1 sec)"
@@ -225,28 +237,30 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
             
             st["motor_a"] = False
             st["motor_b"] = True   # push into stopper for ALIGNING phase
-            st["counter"] = 0
+            st["counter_B"] = 0
 
             st["b_has_part"] = True
             st["a_at_end"] = False
             
-            st["state"] = "ALIGNING"
-        
+            st["state_A"] = "IDLE"
+            st["state_B"] = "ALIGNING"
+            
         # Auto sensor S1B after 1 tick
-        if st["counter"] >= 1:
+        if st["counter_B"] >= 1:
             message = "Auto S1B confirmed: hit stopper, pushing a part into align stopper (1 sec)"
             st["S1B"] = False
             
             st["motor_a"] = False
             st["motor_b"] = True   # push into stopper for ALIGNING phase
-            st["counter"] = 0
+            st["counter_B"] = 0
 
             st["b_has_part"] = True
             st["a_at_end"] = False
             
-            st["state"] = "ALIGNING"
+            st["state_A"] = "IDLE"
+            st["state_B"] = "ALIGNING"
                 
-        elif st["counter"] >= 4:
+        elif st["counter_B"] >= 4:
             error_code = "E_S1B_TIMEOUT"
             level = "WARN"
             event_type = "auto_recover"
@@ -257,9 +271,9 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
                 
                 st["motor_a"] = False
                 st["motor_b"] = False
-                st["counter"] = 0
+                st["counter_A"] = 0
                 
-                st["state"] = "MOVE_TO_S2A"   # new state name only, logic minimal
+                st["state_A"] = "MOVE_TO_S2A"   # new state name only, logic minimal
                 
             elif st["a_at_end"]:
                 message = "WARN: S1B timeout in line zone -> auto reset to 'AT_END' state (operator may have removed part)"
@@ -267,40 +281,42 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
                 
                 st["motor_a"] = False
                 st["motor_b"] = False
-                st["counter"] = 0
+                st["counter_A"] = 0
                 
-                st["state"] = "AT_END"
+                st["state_A"] = "AT_END"
             else:    
                 keep_completed = st.get("completed_count", 0)
                 st.clear()
                 st.update(reset_system())
                 st["completed_count"] = keep_completed
-                message = "WARN: S1B timeout in line zone -> auto reset: system returned to WAIT_EMPTY"
+                message = "WARN: S1B timeout in line zone -> auto reset: system returned to IDLE"
             
         else:
             message = "Transfer in progress: waiting for S1B"
             
-    elif state == "PREP_TRANSFER_S1B":
+    elif st["state_B"] == "PREP_TRANSFER_S1B":
         message = "Tick: next section moving, start current section motor -> TRANSFER"
 
         st["motor_a"] = True
-        st["counter"] = 0
+        st["counter_B"] = 0
         
         st["a_at_end"] = True
         st["station_ready"] = False
         
-        st["state"] = "TRANSFER_S1B"
-    
-        # --- AUTO TRANSFER LOGIC ---        
-    elif state == "AT_END":
+        st["state_B"] = "TRANSFER_S1B"
+        
+        
+
+             
+    if st["state_A"] == "AT_END":
             event_type = "controller"
             level = "INFO"
             error_code = None
             
             if not st["a_at_end"]:
-                message = "WARN: AT_END without a_at_end -> forcing WAIT_EMPTY"
+                message = "WARN: AT_END without a_at_end -> forcing IDLE"
                 
-                st["counter"] = 0
+                st["counter_B"] = 0
                 
                 level = "WARN"
                 error_code = "E_STATE_MISMATCH"
@@ -308,7 +324,7 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
                 
                 deny_transfer(st)
                 
-                st["state"] = "WAIT_EMPTY"
+                st["state_A"] = "IDLE"
                 
             elif not st["station_ready"]:
                 message = "Cannot transfer: station is busy"
@@ -337,27 +353,27 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
                 st["a_at_end"] = True
                 st["a_has_part"] = False
                 
-                st["state"] = "PREP_TRANSFER_S1B"
+                st["state_B"] = "PREP_TRANSFER_S1B"
     
-    elif state == "MOVE_TO_S2A":
+    elif st["state_A"] == "MOVE_TO_S2A":
         message = "Tick: moving to S2A..."
         
         st["motor_a"] = True
-        st["counter"] += 1
+        st["counter_A"] += 1
         
         # Auto sensor S2A after 2 ticks
-        if st["counter"] >= 2:
+        if st["counter_A"] >= 2:
             message = "Auto S2A confirmed -> AT_END"
             
             st["a_at_end"]=True
             st["a_has_part"] = False
             
             st["motor_a"] = False
-            st["counter"] = 0
+            st["counter_A"] = 0
             
-            st["state"] = "AT_END"
+            st["state_A"] = "AT_END"
             
-        if st["counter"] >= 4:
+        if st["counter_A"] >= 4:
             error_code = "E_S2A_TIMEOUT"
             event_type = "auto_recover"
             level = "WARN"
@@ -367,33 +383,33 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
                 
                 st["motor_a"] = False
                 st["motor_b"] = False
-                st["counter"] = 0
+                st["counter_A"] = 0
                 
-                st["state"] = "MOVE_TO_S2A"
+                st["state_A"] = "MOVE_TO_S2A"
                 
             elif st["a_at_end"]:
                 message = "WARN: S2A timeout in line zone -> auto reset to 'AT_END' state (operator may have removed part)"
                 
                 st["motor_a"] = False
                 st["motor_b"] = False
-                st["counter"] = 0
+                st["counter_A"] = 0
                 
-                st["state"] = "AT_END"
+                st["state_A"] = "AT_END"
                 
             else:
-                message = "WARN: S2A timeout in line zone -> auto reset to 'WAIT_EMPTY' state (operator may have removed part)"
+                message = "WARN: S2A timeout in line zone -> auto reset to 'IDLE' state (operator may have removed part)"
                 
                 keep_completed = st.get("completed_count", 0)
                 st.clear()
                 st.update(reset_system())
                 st["completed_count"] = keep_completed   
     
-    elif st["state"] == "TRANSFER_S1A":
+    elif st["state_A"] == "TRANSFER_S1A":
         message = "Tick: moving upstream part -> S1A (waiting for S1A sensor)"
         
         st["motor_u"] = True
         st["motor_a"] =  True
-        st["counter"] += 1
+        st["counter_A"] += 1
         
         if st["S1A"]:
             message = "Auto S1A confirmed -> moving to S2A"
@@ -401,34 +417,34 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
             
             st["motor_u"] = False
             st["motor_a"] = False
-            st["counter"] = 0
+            st["counter_A"] = 0
             
             st["a_has_part"] = True
             st["u_has_part"] = False
 
-            st["state"] = "MOVE_TO_S2A"
+            st["state_A"] = "MOVE_TO_S2A"
             
             return message, error_code, level, event_type
         
         # Auto sensor S1A after 1 tick
-        if st["counter"] >= 1:
+        if st["counter_A"] >= 1:
             message = "Auto S1A confirmed -> moving to S2A"
             st["S1A"] = False
             
             st["motor_u"] = False
             st["motor_a"] = False
-            st["counter"] = 0
+            st["counter_A"] = 0
             
             st["a_has_part"] = True
             st["u_has_part"] = False
 
-            st["state"] = "MOVE_TO_S2A"
+            st["state_A"] = "MOVE_TO_S2A"
             
             return message, error_code, level, event_type
         
         
-        if st["counter"] >= 4:
-            message = "WARN: S1A timeout in line zone -> auto reset to 'WAIT_EMPTY' state (operator may have removed part)"
+        if st["counter_A"] >= 4:
+            message = "WARN: S1A timeout in line zone -> auto reset to 'IDLE' state (operator may have removed part)"
             
             error_code = "E_S1A_TIMEOUT"
             event_type = "auto_recover"
@@ -439,26 +455,23 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
             st.update(reset_system())
             st["completed_count"] = keep_completed
                 
-    elif st["state"] == "PREP_TRANSFER_S1A":
+    elif st["state_A"] == "PREP_TRANSFER_S1A":
         message = "Tick: transfer of an evaporator to S1A" 
         
         st["motor_u"] = True
         st["motor_a"] =  True
-        st["counter"] += 1
-        
-        st["u_has_part"] = True
-        st["a_has_part"] = False
+        st["counter_A"] += 1
 
-        st["state"] = "TRANSFER_S1A" 
+        st["state_A"] = "TRANSFER_S1A" 
                
-    elif st["u_has_part"] and (not st["a_has_part"]) and st["state"] == "WAIT_EMPTY":
+    elif st["u_has_part"] and (not st["a_has_part"]) and st["state_A"] == "IDLE":
             message = "Tick: preparing motor of the next section to transfer to S1A"
             
             st["motor_u"] = False
             st["motor_a"] = True
-            st["counter"] = 0
+            st["counter_A"] = 0
  
-            st["state"] = "PREP_TRANSFER_S1A"
+            st["state_A"] = "PREP_TRANSFER_S1A"
             
             return message, error_code, level, event_type
                                 
@@ -470,6 +483,24 @@ def main():
     run_id = uuid.uuid4().hex[:8]
     st = reset_system()
 
+    import random
+    
+    def generate_next_feed_interval(mode: str) -> int:
+        if mode == "max":
+            return random.randint(3,4)
+        elif mode == "normal":
+            return random.randint(4,6)
+        elif mode == "random":
+            return random.randint(3,10)
+        return 3
+    
+    def try_auto_feed(st:dict) -> str | None:
+        if st["u_has_part"]:
+            return None
+        
+        st["u_has_part"] = True
+        return "AUTO FEED: new part arrived at U"
+    
     logging_enabled = True
     auto_clear_log_on_start = False
 
@@ -477,7 +508,7 @@ def main():
         clear_log_file()
 
     print("LineCheck Simulator started")
-    print("Commands: feed, S1A, S2A, S1B, tick, reset, clearcount, clearlog, log, exit")
+    print("Commands: run, stop, flow (max / normal / random), stepauto, feed, S1A, S2A, S1B, tick, reset, clearcount, clearlog, log, exit")
 
     should_exit = False
 
@@ -490,7 +521,7 @@ def main():
         event_type = "command"
         level = "INFO"
         
-        if st["state"] == "ERROR" and command not in ("reset", "exit", "log", "clearlog", "clearcount"):
+        if (st["state_A"]  == "ERROR" or st["state_B"] == "ERROR") and command not in ("reset", "exit", "log", "clearlog", "clearcount"):
             message = "ERROR state: only reset, exit, log, clearlog, clearcount allowed"
             
             error_code = st.get("error_code") or "E_ERROR_LOCK"
@@ -525,27 +556,60 @@ def main():
                 message = "Manual reset: returning to 'MOVE_TO_S2A' state"
                 
                 st["motor_a"] = False
-                st["counter"] = 0
+                st["counter_A"] = 0
                 
-                st["state"] = "MOVE_TO_S2A"   # new state name only, logic minimal
+                st["state_A"] = "MOVE_TO_S2A"   # new state name only, logic minimal
                 
             elif st["a_at_end"]:
                 message = "Manual reset: returning to 'AT_END' state"
                 
                 st["motor_a"] = False
-                st["counter"] = 0
+                st["counter_A"] = 0
                 
-                st["state"] = "AT_END"
+                st["state_A"] = "AT_END"
                 
             else:    
-                message = "Manual reset: system returned to WAIT_EMPTY"
+                message = "Manual reset: system returned to IDLE"
                 
                 keep_completed = st.get("completed_count", 0)
                 st.clear()
                 st.update(reset_system())
                 st["completed_count"] = keep_completed
                 
+        elif command == "run":
+            st["auto_run"] = True
+            
+            message = "Auto run -> ON"
+        
+        elif command == "stop":
+            st["auto_run"] = False
+            
+            message = "Auto run -> OFF"
+            
+        elif command.startswith("flow "):
+            mode = command.split(" ", 1)[1].strip()
+            
+            if mode in ("max", "normal", "random"):
+                st["flow_mode"] = mode
+                st["next_feed_in"] = generate_next_feed_interval(mode)
                 
+                message = f"Flow mode set to {mode}"
+            
+            else:
+                message = "Unknown flow mode"
+                
+        elif command == "stepauto":
+            message, error_code, level, event_type = handle_tick(st)
+            
+            st["next_feed_in"] -= 1
+            
+            if st["next_feed_in"] <= 0:
+                auto_msg = try_auto_feed(st)
+                st["next_feed_in"] = generate_next_feed_interval(st["flow_mode"])
+                
+                if auto_msg: 
+                    message = f"{message} | {auto_msg}"
+            
         elif command == "feed":
             
             if st["u_has_part"]:
@@ -563,88 +627,24 @@ def main():
                 event_type = "sensor"
                 level = "INFO"
                 
-        elif command == "s1a":
-            
-            if st["state"] not in ("PREP_TRANSFER_S1A", "TRANSFER_S1A"):
-                message = "S1A ignored: no transfer"
-                st["S1A"] = False
-                
-                error_code = "E_S1A_UNEXPECTED"
-                level = "WARN"
-                  
-            else:  
-                message = "S1A triggered (radiator detected at entry)"
-                st["S1A"] = True
-                st["S1B"] = False
-                
             
         elif command == "s2a":
             message = ("Manual load at S2A (radiator placed manually)" 
-            if st["state"] == "WAIT_EMPTY" else "S2A triggered (radiator at end position)")
+            if st["state_A"] == "IDLE" else "S2A triggered (radiator at end position)")
             
             st["motor_a"] = False
             st["motor_b"] = False
-            st["counter"] = 0
+            st["counter_A"] = 0
             
             st["a_has_part"] = False
             st["a_at_end"] = True
             
-            st["state"] = "AT_END"
+            st["state_A"] = "AT_END"
             
-        elif command == "s1b":
-            error_code = None
-            event_type = "sensor"
-            
-            
-            if st["state"] != "TRANSFER_S1B":
-                message = "S1B ignored: no transfer in progress"
-                st["S1B"]= False
-                
-                error_code = "E_S1B_UNEXPECTED"
-                level = "WARN"
-            
-            else:
-                message = "S1B triggered (evaporator detected on next section)"
-                st["S1B"] = True
-                
-                level = "INFO"
-                
-                message, error_code, level, event_type = handle_tick(st)
-
-        elif command == "clamp":
-            error_code = None
-            event_type = "actuator"
-
-            if st["state"] == "WAIT_CLAMP":
-                message = "Clamp command accepted: manipulator started"
-
-                st["clamp"] = True
-                st["clamped"] = False
-                # safety: motors off while manipulator starts
-                st["motor_a"] = False
-                st["motor_b"] = False
-                st["counter"] = 0
-                
-                level = "INFO"
-                st["state"] = "CLAMPING"
-            else: 
-                message = "Clamp not allowed in this state"
-                
-                error_code = "E_INVALID_STATE"
-                level = "WARN"
                 
         elif command == "tick":
             message, error_code, level, event_type = handle_tick(st)
-            
-            if st["state"] == "DONE":
-                message = "DONE -> reset to WAIT_EMPTY"
-                
-                keep_completed = st.get("completed_count", 0)
-                st.clear()
-                st.update(reset_system())
-                st["completed_count"] = keep_completed
-                
-                
+                              
         elif command == "clearcount":
             message = "completed_count reset to 0"
             
@@ -659,9 +659,9 @@ def main():
         
         # event classification
         if event_type == "command":
-            if command in ("s1A", "s2a", "s1b"):
-                event_type = "sensor"
-            elif command == "tick":
+            #if command in ("s1a", "s2a", "s1b"):
+                #event_type = "sensor"
+            if command == "tick":
                 event_type = "controller"
             elif command in ("reset", "clearlog", "log", "clearcount"):
                 event_type = "maintenance"
