@@ -1,3 +1,5 @@
+import time
+import threading
 import os
 import json
 import uuid
@@ -37,14 +39,55 @@ def reset_system() -> dict:
         "error_msg": "",
         
         "tick": 0,
+        "tick_delay": 0.5,
         "auto_run": False, 
         "flow_mode": "normal", #max / normal / random
         "next_feed_in": 3,
         "completed_count": 0,
     }
+    
+def clear_screen() -> None:
+    os.system("cls" if os.name == "nt" else "clear")
+    
+def print_status(message: str, st: dict) -> None:
+    clear_screen()
+    print("=" * 50)
+    print("LINECHECK SIMULATOR HMI")
+    print("=" * 50)
+    print(f"Message: {message}\n")
 
+    print(f"Flow mode   : {st['flow_mode']}")
+    print(f"Next feed in: {st['next_feed_in']}")
+    print(f"Auto run    : {'ON' if st['auto_run'] else 'OFF'}")
+    print(f"Tick        : {st['tick']}")
+    print(f"Completed   : {st['completed_count']}\n")
 
+    print("LINE OCCUPANCY")
+    print(f"U      : {'PART' if st['u_has_part'] else 'EMPTY'}")
+    print(f"A      : {'PART' if st['a_has_part'] else 'EMPTY'}")
+    print(f"A_END  : {'PART' if st['a_at_end'] else 'EMPTY'}")
+    print(f"B      : {'PART' if st['b_has_part'] else 'EMPTY'}")
+    print(f"B ready: {'YES' if st['station_ready'] else 'NO'}\n")
+
+    print("MOTORS / ACTUATORS")
+    print(f"Motor U      : {'ON' if st['motor_u'] else 'OFF'}")
+    print(f"Motor A      : {'ON' if st['motor_a'] else 'OFF'}")
+    print(f"Motor B      : {'ON' if st['motor_b'] else 'OFF'}")
+    print(f"Align stopper: {'OUT' if st['align_stopper'] else 'IN'}")
+    print(f"Aligned      : {'YES' if st['aligned'] else 'NO'}")
+    print(f"Clamp        : {'ON' if st['clamp'] else 'OFF'}")
+    print(f"Clamped      : {'YES' if st['clamped'] else 'NO'}\n")
+
+    print("SECTION STATES")
+    print(f"State A   : {st['state_A']}")
+    print(f"State B   : {st['state_B']}")
+    print(f"Counter A : {st['counter_A']}")
+    print(f"Counter B : {st['counter_B']}\n")
+
+    print("Commands: run, stop, stepauto, feed, s2a, reset, flow max/normal/random, log, exit")
+    print("=" * 50)
 # ---------- helpers ----------
+'''
 def print_status(message: str, st: dict) -> None:
     print(message)
     print(f"Flow mode: {st['flow_mode']}")
@@ -68,6 +111,7 @@ def print_status(message: str, st: dict) -> None:
     print(f"Current state section B: {st['state_B']}")
     print(f"Global completed count: {st['completed_count']}")
     print(f"Global tick: {st['tick']}")
+'''
 def clear_log_file() -> None:
     open(LOG_FILE, "w", encoding="utf-8").close()
 
@@ -482,7 +526,9 @@ def handle_tick(st: dict) -> tuple[str, str | None, str, str]:
 def main():
     run_id = uuid.uuid4().hex[:8]
     st = reset_system()
-
+    state_lock = threading.Lock()
+    auto_thread = None
+    
     import random
     
     def generate_next_feed_interval(mode: str) -> int:
@@ -501,6 +547,42 @@ def main():
         st["u_has_part"] = True
         return "AUTO FEED: new part arrived at U"
     
+    
+    def do_auto_step(st:dict):
+            message, error_code, level, event_type = handle_tick(st)
+            auto_msg = None
+            st["next_feed_in"]-=1
+            
+            if st["next_feed_in"] <= 0:
+                auto_msg = try_auto_feed(st)
+                st["next_feed_in"] = generate_next_feed_interval(st["flow_mode"])
+                
+            if auto_msg:
+                message = f"{message} | {auto_msg}"
+                
+            return message, error_code, level, event_type
+        
+    def auto_run_loop():
+        nonlocal should_exit
+        while True:
+            with state_lock:
+                if st["tick"] % 5 == 0:
+                    print_status("Auto update", st)
+                if not st["auto_run"] or should_exit:
+                    break
+                message, error_code, level, event_type = do_auto_step(st)
+                
+                log_event(
+                    run_id,
+                    "auto_tick",
+                    message,
+                    st,
+                    event_type = event_type,
+                    level = level,
+                    error_code = error_code,
+                    enabled = logging_enabled,
+                )
+            time.sleep(st["tick_delay"])
     logging_enabled = True
     auto_clear_log_on_start = False
 
@@ -521,6 +603,8 @@ def main():
         event_type = "command"
         level = "INFO"
         
+        
+                
         if (st["state_A"]  == "ERROR" or st["state_B"] == "ERROR") and command not in ("reset", "exit", "log", "clearlog", "clearcount"):
             message = "ERROR state: only reset, exit, log, clearlog, clearcount allowed"
             
@@ -538,9 +622,10 @@ def main():
             continue
         
         elif command == "exit":
-            message = "Simulation stopped by user"
-            
-            should_exit = True
+            with state_lock:
+                message = "Simulation stopped by user"
+                
+                should_exit = True
 
         elif command == "log":
             logging_enabled = not logging_enabled
@@ -551,106 +636,130 @@ def main():
             message = "Log cleared"
 
         elif command == "reset":
-            
-            if st["a_has_part"]:
-                message = "Manual reset: returning to 'MOVE_TO_S2A' state"
-                
-                st["motor_a"] = False
-                st["counter_A"] = 0
-                
-                st["state_A"] = "MOVE_TO_S2A"   # new state name only, logic minimal
-                
-            elif st["a_at_end"]:
-                message = "Manual reset: returning to 'AT_END' state"
-                
-                st["motor_a"] = False
-                st["counter_A"] = 0
-                
-                st["state_A"] = "AT_END"
-                
-            else:    
-                message = "Manual reset: system returned to IDLE"
-                
-                keep_completed = st.get("completed_count", 0)
-                st.clear()
-                st.update(reset_system())
-                st["completed_count"] = keep_completed
+            with state_lock:
+                if st["a_has_part"]:
+                    message = "Manual reset: returning to 'MOVE_TO_S2A' state"
+                    
+                    st["motor_a"] = False
+                    st["counter_A"] = 0
+                    
+                    st["state_A"] = "MOVE_TO_S2A"   # new state name only, logic minimal
+                    
+                elif st["a_at_end"]:
+                    message = "Manual reset: returning to 'AT_END' state"
+                    
+                    st["motor_a"] = False
+                    st["counter_A"] = 0
+                    
+                    st["state_A"] = "AT_END"
+                    
+                else:    
+                    message = "Manual reset: system returned to IDLE"
+                    
+                    keep_completed = st.get("completed_count", 0)
+                    st.clear()
+                    st.update(reset_system())
+                    st["completed_count"] = keep_completed
                 
         elif command == "run":
-            st["auto_run"] = True
-            
-            message = "Auto run -> ON"
-        
+            with state_lock:
+                if st["auto_run"]:
+                    message = "Auto run is already ON"
+                    level = "WARN"
+                
+                else:
+                    message = "Auto run -> ON"
+                    st["auto_run"] = True
+                    
+                    auto_thread = threading.Thread(target = auto_run_loop, daemon = True)
+                    auto_thread.start()
+                    
+                '''    
+                print_status(message, st)
+                
+                log_event(run_id, command, message, st, event_type = "controller", level = "INFO", error_code = None, enabled = logging_enabled)
+               
+                while st["auto_run"]:
+                    message, error_code, level, event_type = do_auto_step(st)
+                    print_status(message, st)
+                    
+                    log_event(run_id, "auto_tick", message, st, event_type = event_type, level = level, error_code = error_code, enabled = logging_enabled)
+                    
+                    time.sleep(st["tick_delay"])
+            '''
         elif command == "stop":
-            st["auto_run"] = False
-            
-            message = "Auto run -> OFF"
+            with state_lock:
+                if not st["auto_run"]:
+                    message = "Auto run is already OFF"
+                    level = "WARN"
+                
+                else:
+                    message = "Auto run -> OFF"
+                    st["auto_run"] = False     
             
         elif command.startswith("flow "):
-            mode = command.split(" ", 1)[1].strip()
-            
-            if mode in ("max", "normal", "random"):
-                st["flow_mode"] = mode
-                st["next_feed_in"] = generate_next_feed_interval(mode)
+            with state_lock:
+                mode = command.split(" ", 1)[1].strip()
                 
-                message = f"Flow mode set to {mode}"
-            
-            else:
-                message = "Unknown flow mode"
+                if mode in ("max", "normal", "random"):
+                    st["flow_mode"] = mode
+                    st["next_feed_in"] = generate_next_feed_interval(mode)
+                    
+                    message = f"Flow mode set to {mode}"
+                
+                else:
+                    message = "Unknown flow mode"
                 
         elif command == "stepauto":
-            message, error_code, level, event_type = handle_tick(st)
-            
-            st["next_feed_in"] -= 1
-            
-            if st["next_feed_in"] <= 0:
-                auto_msg = try_auto_feed(st)
-                st["next_feed_in"] = generate_next_feed_interval(st["flow_mode"])
+            with state_lock:
+                message, error_code, level, event_type = do_auto_step(st)
                 
-                if auto_msg: 
-                    message = f"{message} | {auto_msg}"
+                event_type = do_auto_step(st)
             
         elif command == "feed":
-            
-            if st["u_has_part"]:
-                 message = "Feed ignored: upstream already has a part"
-                 
-                 error_code = "E_FEED_ALREADY_PRESENT"
-                 event_type = "QA"
-                 level = "WARN"
-                 
-            else:
-                message = "Feed registered: part is at upstream end"
+            with state_lock:
+                if st["u_has_part"]:
+                    message = "Feed ignored: upstream already has a part"
+                    
+                    error_code = "E_FEED_ALREADY_PRESENT"
+                    event_type = "QA"
+                    level = "WARN"
+                    
+                else:
+                    message = "Feed registered: part is at upstream end"
+                    
+                    st["u_has_part"] = True
                 
-                st["u_has_part"] = True
-             
-                event_type = "sensor"
-                level = "INFO"
-                
+                    event_type = "sensor"
+                    level = "INFO"
+
             
         elif command == "s2a":
-            message = ("Manual load at S2A (radiator placed manually)" 
-            if st["state_A"] == "IDLE" else "S2A triggered (radiator at end position)")
-            
-            st["motor_a"] = False
-            st["motor_b"] = False
-            st["counter_A"] = 0
-            
-            st["a_has_part"] = False
-            st["a_at_end"] = True
-            
-            st["state_A"] = "AT_END"
+            with state_lock:
+                message = ("Manual load at S2A (radiator placed manually)" 
+                if st["state_A"] == "IDLE" else "S2A triggered (radiator at end position)")
+                
+                st["motor_a"] = False
+                st["motor_b"] = False
+                st["counter_A"] = 0
+                
+                st["a_has_part"] = False
+                st["a_at_end"] = True
+                
+                st["state_A"] = "AT_END"
             
                 
         elif command == "tick":
-            message, error_code, level, event_type = handle_tick(st)
-                              
+            with state_lock:
+                message, error_code, level, event_type = handle_tick(st)
+                                
         elif command == "clearcount":
-            message = "completed_count reset to 0"
-            
-            st["completed_count"] = 0
-            
-            event_type = "maintenance"    
+            with state_lock:
+                message = "completed_count reset to 0"
+                
+                st["completed_count"] = 0
+                
+                event_type = "maintenance"    
                 
         else:
             message = "Unknown command"
