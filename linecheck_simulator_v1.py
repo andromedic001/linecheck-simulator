@@ -4,6 +4,7 @@ import uuid
 import time
 import threading
 from datetime import datetime
+import copy
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -104,6 +105,17 @@ def reset_system() -> dict:
 def clear_screen() -> None:
     os.system("cls" if os.name == "nt" else "clear")
 
+def clear_qa_counts(st: dict) -> None:
+    for key in st["qa_counts"]:
+        st["qa_counts"][key] = 0
+        
+def clear_runtime_messages(st: dict) -> None:
+    st["msg_U"] = ""
+    st["msg_A"] = ""
+    st["msg_B"] = ""
+    st["qa_msg_U"] = ""
+    st["qa_msg_A"] = ""
+    st["qa_msg_B"] = ""
 
 def stop_all_motors(st: dict) -> None:
     st["motor_u"] = False
@@ -226,8 +238,8 @@ def print_status(message: str, st: dict) -> None:
 
     print("Commands:")
     print("run | stop | status | stepauto | tick")
-    print("feed | s2a | reset | flow max/normal/random")
-    print("recover | log | clearlog | clearcount | exit\n")
+    print("feed | s2a | reset | recover | flow max/normal/random")
+    print(" log | clearlog | clearcount | exit\n")
     
     print("STATISTICS")
     print(f"Parts per tick : {st['parts_per_tick']:.4f}")
@@ -289,11 +301,21 @@ def fsm_section_B(st: dict) -> tuple[str, str | None, str, str] | None:
         return "B: prep transfer -> TRANSFER_S1B", None, "INFO", "controller"
 
     if state_B == "TRANSFER_S1B":
+        st["msg_B"] = "INFO: transfer to B"
         st["counter_B"] += 1
         st["motor_a"] = True
         st["motor_b"] = True
 
         # auto confirm after 1 tick
+        if st["counter_B"] >= 1:
+            st["counter_B"] = 0
+            st["motor_a"] = False
+            st["motor_b"] = True
+            st["b_has_part"] = True
+            st["a_at_end"] = False
+            st["state_A"] = "A_CLEARING"
+            st["state_B"] = "ALIGNING"
+            return "Auto S1B confirmed -> ALIGNING", None, "INFO", "controller"
         if st["counter_B"] >= 4:
             def recover_s1b(st_local):
                 stop_all_motors(st_local)
@@ -311,18 +333,7 @@ def fsm_section_B(st: dict) -> tuple[str, str | None, str, str] | None:
                 "WARN: S1B timeout -> auto recover applied",
                 "ERROR: repeated S1B timeout -> manual reset required",
                 recover_s1b,
-    )
-    
-        if st["counter_B"] >= 1:
-            st["counter_B"] = 0
-            st["motor_a"] = False
-            st["motor_b"] = True
-            st["b_has_part"] = True
-            st["a_at_end"] = False
-            st["state_A"] = "A_CLEARING"
-            st["state_B"] = "ALIGNING"
-            return "Auto S1B confirmed -> ALIGNING", None, "INFO", "controller"
-
+            )
         return "B: transfer in progress", None, "INFO", "controller"
 
     if state_B == "ALIGNING":
@@ -339,6 +350,7 @@ def fsm_section_B(st: dict) -> tuple[str, str | None, str, str] | None:
         return "B: aligning...", None, "INFO", "controller"
 
     if state_B == "WAIT_CLAMP":
+        st["msg_B"] = "INFO: waiting clamp"
         st["clamp"] = True
         st["clamped"] = False
         st["counter_B"] = 0
@@ -350,7 +362,10 @@ def fsm_section_B(st: dict) -> tuple[str, str | None, str, str] | None:
         st["clamp"] = True
         st["msg_B"] = "INFO: clamping"
         if st["counter_B"] >= 10:
+            
             stop_all_motors(st)
+            st["auto_run"] = False
+            
             st["clamp"] = False
             st["error_code"] = "E_CLAMP_TIMEOUT"
             st["error_msg"] = "Clamp did not finish in time"
@@ -371,6 +386,8 @@ def fsm_section_B(st: dict) -> tuple[str, str | None, str, str] | None:
         st["counter_B"] += 1
 
         if st["counter_B"] >= 2:
+            st["msg_B"] = "INFO: discharging"
+            
             st["counter_B"] = 0
             st["motor_b"] = False
             st["align_stopper"] = False
@@ -381,8 +398,11 @@ def fsm_section_B(st: dict) -> tuple[str, str | None, str, str] | None:
             st["b_has_part"] = False
             st["completed_count"] += 1
             
-            #look - ahead optimization
+            # throughput optimization:
+            # if next part is already waiting at A_END,
+            # do not go through full idle loop, start next transfer immediately
             if st["a_at_end"] and not st["b_has_part"]:
+                st["msg_B"] = "INFO: next transfer immediately"
                 st["state_B"] = "TRANSFER_S1B"
                 return "B discharge -> next transfer immediately", None, "INFO", "controller"
             else: 
@@ -392,7 +412,10 @@ def fsm_section_B(st: dict) -> tuple[str, str | None, str, str] | None:
         return "B: discharging...", None, "INFO", "controller"
 
     if state_B == "ERROR":
+        
+        st["auto_run"] = False
         stop_all_motors(st)
+        
         return "B: ERROR state", st.get("error_code"), "ERROR", "controller"
 
     return None
@@ -431,12 +454,33 @@ def fsm_section_A(st: dict) -> tuple[str, str | None, str, str] | None:
             if st["a_at_end"]:
                 st["motor_a"] = False
                 st["state_A"] = "A_WAIT_END_FREE"
-                return "WARN: S1A confirmed, but A end is occupied -> waiting", "E_A_END_BLOCKED", "WARN", "interlock"
+                return "INFO: S1A confirmed, but A end is occupied -> waiting", None, "INFO", "interlock"
             else:
+                st["msg_A"] = "INFO: moving to A end"
                 st["motor_a"] = True
                 st["state_A"] = "MOVE_TO_S2A"
+                
                 return "S1A confirmed -> continue moving to S2A", None, "INFO", "controller"
 
+        
+        # auto confirm after 1 tick
+        if st["counter_A"] >= 1:
+            st["motor_u"] = False
+            st["u_has_part"] = False
+            st["a_has_part"] = True
+
+            if st["a_at_end"]:
+                st["counter_A"] = 0
+                st["motor_a"] = False
+                st["state_A"] = "A_WAIT_END_FREE"
+                return "INFO: auto S1A confirmed, but A end is occupied -> waiting", None, "INFO", "interlock"
+            else:
+                st["msg_A"] = "INFO: moving to A end"
+                st["counter_A"] = 1
+                st["motor_a"] = True
+                st["state_A"] = "MOVE_TO_S2A"
+                return "Auto S1A confirmed -> continue moving to S2A", None, "INFO", "controller"
+            
         if st["counter_A"] >= 4:
             def recover_s1a(st_local):
                 stop_all_motors(st_local)
@@ -452,23 +496,6 @@ def fsm_section_A(st: dict) -> tuple[str, str | None, str, str] | None:
                 "ERROR: repeated S1A timeout -> manual reset required",
                 recover_s1a,
             )
-        # auto confirm after 1 tick
-        if st["counter_A"] >= 1:
-            st["motor_u"] = False
-            st["u_has_part"] = False
-            st["a_has_part"] = True
-
-            if st["a_at_end"]:
-                st["counter_A"] = 0
-                st["motor_a"] = False
-                st["state_A"] = "A_WAIT_END_FREE"
-                return "WARN: auto S1A confirmed, but A end is occupied -> waiting", "E_A_END_BLOCKED", "WARN", "interlock"
-            else:
-                st["counter_A"] = 1
-                st["motor_a"] = True
-                st["state_A"] = "MOVE_TO_S2A"
-                return "Auto S1A confirmed -> continue moving to S2A", None, "INFO", "controller"
-
         return "A: transfer in progress", None, "INFO", "controller"
         
     if state_A == "A_WAIT_END_FREE":
@@ -524,18 +551,22 @@ def fsm_section_A(st: dict) -> tuple[str, str | None, str, str] | None:
         if not st["station_ready"]:
             deny_transfer(st)
             st["msg_A"] = "INFO: station busy"
-            return "A: waiting, station busy", "E_STATION_BUSY", "INFO", "interlock"
+            return "A: waiting, station busy", None, "INFO", "interlock"
 
         if st["b_has_part"]:
             deny_transfer(st)
-            return "A: waiting, next section blocked", "E_NEXT_BLOCKED", "WARN", "interlock"
+            return "A: waiting, next section blocked", None, "INFO", "interlock"
 
         # transfer launch is handled by cascade
         st["msg_A"] = ""
         return "A: part at end, waiting transfer to B", None, "INFO", "controller"
     
     if state_A == "A_CLEARING":
+        # throughput optimization:
+        # keep line moving without going back to IDLE,
+        # pre-arm next transfer while A tail is clearing
         message = "A: clearing tail motion..."
+        st["msg_A"] = "INFO: clearing tail motion"
         st["counter_A"] += 1
         st["motor_a"] = True
 
@@ -543,6 +574,7 @@ def fsm_section_A(st: dict) -> tuple[str, str | None, str, str] | None:
             st["counter_A"] = 0
 
             if st["u_has_part"] and (not st["a_has_part"]) and (not st["a_at_end"]):
+                st["msg_A"] = "INFO: direct next transfer"
                 st["motor_u"] = True
                 st["motor_a"] = True
                 st["state_A"] = "TRANSFER_S1A"
@@ -557,7 +589,10 @@ def fsm_section_A(st: dict) -> tuple[str, str | None, str, str] | None:
         return message, None, "INFO", "controller"
     
     if state_A == "ERROR":
+        
+        st["auto_run"] = False
         stop_all_motors(st)
+        
         return "A: ERROR state", st.get("error_code"), "ERROR", "controller"
 
     return None
@@ -622,10 +657,13 @@ def qa_checks(st: dict) -> tuple[str, str | None, str, str] | None:
     if st["a_has_part"] and st["a_at_end"]:
         if bump("E_A_OCCUPANCY_CONFLICT"):
             stop_all_motors(st)
+            st["auto_run"] = False
+            
             st["error_code"] = "E_A_OCCUPANCY_CONFLICT_X_TIMES"
             st["error_msg"] = "A occupancy conflict repeated too many times"
             st["qa_msg_A"] = "ERROR: A occupancy conflict repeated too many times"
             st["state_A"] = "ERROR"
+            
             return (
                 "ERROR: A occupancy conflict repeated too many times",
                 "E_A_OCCUPANCY_CONFLICT_X_TIMES",
@@ -647,6 +685,8 @@ def qa_checks(st: dict) -> tuple[str, str | None, str, str] | None:
 
     if st["b_has_part"] and st["station_ready"]:
         stop_all_motors(st)
+        st["auto_run"] = False
+        
         st["error_code"] = "E_B_READY_CONFLICT"
         st["error_msg"] = "B has part but station_ready is True"
         st["qa_msg_B"] = "ERROR: B has part but station_ready is True"
@@ -669,6 +709,8 @@ def qa_checks(st: dict) -> tuple[str, str | None, str, str] | None:
     ):
         if bump("E_MOTOR_A_UNEXPECTED"):
             stop_all_motors(st)
+            st["auto_run"] = False
+            
             st["error_code"] = "E_MOTOR_A_UNEXPECTED_X_TIMES"
             st["error_msg"] = "Motor A ran unexpectedly too many times"
             st["qa_msg_A"] = "ERROR: motor A running without valid state too many times"
@@ -699,7 +741,10 @@ def qa_checks(st: dict) -> tuple[str, str | None, str, str] | None:
         or st["state_B"] in ("PREP_TRANSFER_S1B", "TRANSFER_S1B", "ALIGNING", "CLAMPING", "DISCHARGE")
     ):
         if bump("E_MOTOR_B_UNEXPECTED"):
+            
             stop_all_motors(st)
+            st["auto_run"] = False
+            
             st["error_code"] = "E_MOTOR_B_UNEXPECTED_X_TIMES"
             st["error_msg"] = "Motor B ran unexpectedly too many times"
             st["qa_msg_B"] = "ERROR: motor B running without valid state too many times"
@@ -724,7 +769,10 @@ def qa_checks(st: dict) -> tuple[str, str | None, str, str] | None:
     # Clamp active at invalid state
 
     if st["clamp"] and st["state_B"] != "CLAMPING":
+        
         stop_all_motors(st)
+        st["auto_run"] = False
+        
         st["error_code"] = "E_INVALID_CLAMP"
         st["error_msg"] = "Clamp is active at invalid state"
         st["qa_msg_B"] = "ERROR: clamp is active at invalid state"
@@ -739,7 +787,10 @@ def qa_checks(st: dict) -> tuple[str, str | None, str, str] | None:
     # Aligner active at invalid state
 
     if st["align_stopper"] and st["state_B"] not in ("PREP_TRANSFER_S1B", "TRANSFER_S1B", "ALIGNING"):
+        
         stop_all_motors(st)
+        st["auto_run"] = False
+        
         st["error_code"] = "E_INVALID_ALIGN_STOPPER"
         st["error_msg"] = "Align stopper is out at invalid state"
         st["qa_msg_B"] = "ERROR: align stopper is out at invalid state"
@@ -754,7 +805,10 @@ def qa_checks(st: dict) -> tuple[str, str | None, str, str] | None:
     # A state mismatch
 
     if st["state_A"] == "AT_END" and not st["a_at_end"]:
+        
         stop_all_motors(st)
+        st["auto_run"] = False
+        
         st["error_code"] = "E_F_AND_S_MISMATCH"
         st["error_msg"] = "State A is AT_END but a_at_end flag is False"
         st["qa_msg_A"] = "ERROR: state A and a_at_end flag mismatch"
@@ -793,7 +847,10 @@ def auto_recover_or_escalate(
     escalate = register_recoverable_fault(st, error_code)
 
     if escalate:
+        
         stop_all_motors(st)
+        st["auto_run"] = False
+        
         st["error_code"] = error_code
         st["error_msg"] = escalate_message
         st["state_A"] = "ERROR"
@@ -820,6 +877,26 @@ def recover_faults(st: dict) -> str:
     if st["clamp"] and st["state_B"] != "CLAMPING":
         st["clamp"] = False
         return "Recovered: clamp flag cleared"
+
+    # align stopper active at invalid state
+    if st["align_stopper"] and st["state_B"] not in ("PREP_TRANSFER_S1B", "TRANSFER_S1B", "ALIGNING"):
+        st["align_stopper"] = False
+        return "Recovered: align stopper flag cleared"
+
+    # A state mismatch
+    if st["state_A"] == "AT_END" and not st["a_at_end"]:
+        st["state_A"] = "IDLE"
+        return "Recovered: state_A corrected from AT_END to IDLE"
+
+    # unexpected motor A
+    if st["motor_a"] and st["state_A"] not in ("TRANSFER_S1A", "MOVE_TO_S2A", "A_CLEARING", "A_WAIT_END_FREE"):
+        st["motor_a"] = False
+        return "Recovered: unexpected motor A stopped"
+
+    # unexpected motor B
+    if st["motor_b"] and st["state_B"] not in ("PREP_TRANSFER_S1B", "TRANSFER_S1B", "ALIGNING", "CLAMPING", "DISCHARGE"):
+        st["motor_b"] = False
+        return "Recovered: unexpected motor B stopped"
 
     return "No recoverable faults detected"
 
@@ -910,7 +987,7 @@ def main():
         
         return True, "Reset allowed"
     print("LineCheck Simulator started")
-    print("Commands: run, stop, status, stepauto, tick, feed, s2a, reset, qa_clear, flow max/normal/random, clearcount, clearlog, log, exit")
+    print("Commands: run, stop, status, stepauto, tick, feed, s2a, reset, recover, flow max/normal/random, clearcount, clearlog, log, exit")
 
     while True:
         command = input("> ").strip().lower()
@@ -924,7 +1001,7 @@ def main():
             if (st["state_A"] == "ERROR" or st["state_B"] == "ERROR") and command not in (
                 "reset", "recover", "stop", "exit", "log", "clearlog", "clearcount", "status"
             ):
-                message = "ERROR state: only reset, exit, log, clearlog, clearcount, status allowed"
+                message = "ERROR state: only recover, reset, stop, exit, log, clearlog, clearcount, status allowed"
                 error_code = st.get("error_code") or "E_ERROR_LOCK"
                 event_type = "qa"
                 level = "ERROR"
@@ -949,6 +1026,7 @@ def main():
 
             elif command == "clearcount":
                 st["completed_count"] = 0
+                st["tick"] = 0
                 event_type = "maintenance"
                 message = "completed_count reset to 0"
 
@@ -967,7 +1045,8 @@ def main():
                     
                     else:
                         stop_all_motors(st)
-  
+                        clear_qa_counts(st)
+                                
                         # clear latched error
                         st["error_code"] = None
                         st["error_msg"] = ""
@@ -979,31 +1058,25 @@ def main():
                             st["fault_last_tick"][key] = -999999
                             
                         # clear section messages if you already added them
-                        if "msg_A" in st:
-                            st["msg_A"] = ""
-                        if "msg_B" in st:
-                            st["msg_B"] = ""
-                        if "msg_U" in st:
-                            st["msg_U"] = ""
+                        clear_runtime_messages(st)
 
                         # recover to safe state
                         if st["a_has_part"]:
+                                
                             st["counter_A"] = 0
                             st["state_A"] = "MOVE_TO_S2A"
                             st["state_B"] = "IDLE"
                             message = "Manual reset accepted -> MOVE_TO_S2A"
 
                         elif st["a_at_end"]:
+                                
                             st["counter_A"] = 0
                             st["state_A"] = "AT_END"
                             st["state_B"] = "IDLE"
                             message = "Manual reset accepted -> AT_END"
 
                         else:
-                            
-                            for key in st["qa_counts"]:
-                                st["qa_counts"][key] = 0
-                                
+
                             keep_completed = st.get("completed_count", 0)
                             st.clear()
                             st.update(reset_system())
@@ -1013,9 +1086,9 @@ def main():
                         event_type = "maintenance"
                         level = "INFO"
                         
-                    
-                        
                 else:
+                    clear_qa_counts(st)
+                    clear_runtime_messages(st)
                     # normal reset when system is not in ERROR
                     if st["a_has_part"]:
                         stop_all_motors(st)
@@ -1116,7 +1189,7 @@ def main():
                 message = "Unknown command"
 
             # snapshot for watch command
-            snapshot = dict(st)
+            snapshot = copy.deepcopy(st)
 
         print_status(message, snapshot if command.startswith("watch") else st)
 
