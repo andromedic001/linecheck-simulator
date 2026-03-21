@@ -1,197 +1,142 @@
 # LineCheck Simulator
 
-A Python console simulation of an industrial radiator transfer line.
+Console-based simulation of an industrial production line using finite state machines (FSM), inspired by real factory processes.
 
-This project models a real production scenario using a Finite State Machine (FSM),
-tick-based controller logic, actuator timing, and structured logging.
-
-The focus is on process modeling, deterministic state transitions,
-and QA-style reasoning rather than production-ready UI.
+This project focuses on **automation logic, system flow, and state control**, similar to PLC-driven production lines.
 
 ---
 
-## Context
+## Purpose
 
-The simulator represents a section of a production line where radiators:
-
-1. Enter the section (S1 sensor)
-2. Move to the end position (S2 sensor)
-3. Transfer to the next section (if available)
-4. Hit an alignment stopper
-5. Get centered by a clamp manipulator
-6. Are discharged downstream
-
-The logic separates:
-
-- Sensor events
-- Mechanical delay
-- Actuator behavior
-- Time-based controller ticks
+* Practice industrial logic thinking (PLC-style)
+* Simulate real production line behavior
+* Build a technical portfolio project for automation / QA / engineering roles
+* Understand system stability, edge cases, and recovery strategies
 
 ---
 
-## Process Flow
+## Features
 
-### 1. Entry Phase
-- `s1` → Radiator detected at entry  
-- State: `MOVE_TO_S2`  
-- Current section motor ON  
-
-### 2. End Detection
-- `s2` → Radiator at end position  
-- State: `AT_END`  
-
-### 3. Transfer Phase
-- `next` → Prepare transfer  
-- Next section motor ON  
-- Alignment stopper automatically extends  
-- State: `PREP_TRANSFER`  
-
-- `tick` → Transition to `TRANSFER`  
-- Current motor ON  
-
-### 4. N1 Confirmation
-- `n1` → Radiator detected on next section  
-- Transition to `ALIGNING`  
-- 1 tick delay simulates physical impact against stopper  
-
-### 5. Stopper Alignment (1 Tick)
-- Radiator hits stopper  
-- Next motor turns OFF  
-- Stopper retracts  
-- State: `WAIT_CLAMP`  
-
-### 6. Manual Clamp Phase
-- `clamp` → Activate manipulator  
-- State: `CLAMPING`  
-- 2 ticks simulate centering process  
-
-### 7. Discharge Phase
-- After clamping:
-  - Next motor ON  
-  - Radiator moves downstream  
-- 2 ticks simulate discharge  
-- State: `DONE`  
+* Modular FSM architecture (Section A / Section B)
+* Tick-based simulation (discrete time steps)
+* Auto-run mode with configurable flow (max / normal / random)
+* Real-time console HMI (status visualization)
+* Event logging (JSONL format)
+* Fault detection and recovery system
+* Manual control commands for testing scenarios
 
 ---
 
-## What Is Modeled
+## Architecture
 
-- Finite State Machine (FSM)
-- Deterministic tick-based transitions
-- Sensor interrupt logic (N1 handled immediately)
-- Mechanical delay modeling (`ALIGNING` state)
-- Manual actuator control (`CLAMPING`)
-- Controlled discharge cycle
-- Structured JSONL logging
-- Timeout error handling:
-  - `E_S2_TIMEOUT`
-  - `E_N1_TIMEOUT`
-
----
-
-## State Overview
-
-WAIT_EMPTY
-MOVE_TO_S2
-AT_END
-PREP_TRANSFER
-TRANSFER
-ALIGNING
-WAIT_CLAMP
-CLAMPING
-DISCHARGE
-DONE
-
-Each state represents a physically meaningful stage of the process.
+project/
+│
+├── main.py          # entry point, CLI loop, threading
+├── fsm.py           # finite state machines (Section A & B)
+├── cascade.py       # flow / transfer logic between sections
+├── qa.py            # validation, fault detection, recovery
+├── helpers.py       # logging, UI, utilities
+├── state.py         # system state definition
+└── legacy/          # initial monolithic version
 
 ---
 
-## Available Commands
+## System Logic (Tick Flow)
 
-s1 -> trigger entry sensor
-s2 -> trigger end sensor
-next -> allow transfer to next section
-n1 -> trigger next section sensor
-tick -> simulate controller time step
-clamp -> activate clamp manipulator
-next_section_toggle -> manually block/unblock next section
-reset -> reset system
-clearlog -> clear log file
-log -> toggle logging on/off
-exit -> stop simulation
----
+Each simulation step ("tick") runs in the following order:
 
-## Logging
+1. Cascade logic determines if transfers are allowed
+2. Section B FSM executes (downstream priority)
+3. Section A FSM executes
+4. QA layer validates system state
+5. Statistics are updated
 
-Events are written to `events.jsonl` in JSONL format.
-
-Each event contains:
-
-- timestamp
-- run_id
-- event_type
-- level
-- error_code (if any)
-- full state snapshot
-
-The logger is protected with `try/except` to ensure
-that logging errors never crash the simulator.
+This structure mimics real industrial systems where downstream constraints affect upstream behavior.
 
 ---
 
-## Project Goals
+## Simulated Sections
 
-This project is built to:
-
-- Practice FSM modeling
-- Simulate real industrial timing logic
-- Separate sensor events from mechanical delays
-- Apply QA-style reasoning
-- Improve deterministic system design thinking
-- Build a foundation for future:
-  - Automated tests
-  - Monitoring
-  - API layer (FastAPI)
-  - Database integration
+* **U (Upstream)** — part source
+* **A (Transport section)** — movement + buffering
+* **B (Station)** — alignment, clamping, discharge
 
 ---
 
-## How to Run
+## Fault Handling
 
-```bash
-python main.py
-```
+The system includes:
 
-Follow the process flow described above.
+* Warning → Error escalation logic
+* Auto-recovery for recoverable faults
+* Manual reset for critical failures
+* State validation (QA layer)
 
-## Project Status
-Active learning project.
+Example fault types:
 
-The simulator now models a full mechanical cycle including:
+* Sensor timeouts
+* Occupancy conflicts
+* Invalid actuator states
+* State/flag mismatches
 
-- Stopper impact delay
-- Manual clamping
-- Timed discharge
-- Deterministic completion
+---
 
-##Why This Matters
-Real production systems are not just sensor triggers.
+## Commands
 
-They include:
+run — start automatic simulation
+stop — stop auto mode
+tick — single simulation step
+stepauto — one auto step with feed logic
 
--Mechanical inertia
--Physical alignment delays
--Actuator timing
--Safety-oriented transitions
+feed — add part to upstream
+s2a — force part at A end
 
-This simulator attempts to reflect that reality in code.
+reset — reset system (safe conditions required)
+recover — attempt auto recovery
 
-Author: Andrii Dehtiar
-Project Type: Industrial Logic Simulation / QA Practice
+flow max / normal / random — change feed behavior
 
-## Roadmap (planned)
-- Remove manual transfer command
-- Add upstream sensor for queue simulation
-- Introduce auto-flow mode (feed-only)
-- Add real-time tick mode
+clearlog — clear event log
+clearcount — reset statistics
+
+exit — terminate program
+
+---
+
+## Statistics
+
+* Parts per tick
+* Estimated throughput (1h / 8h)
+* Real-time performance tracking
+
+---
+
+## Legacy Version
+
+Initial monolithic implementation is stored in:
+
+/legacy/linecheck_simulator_v1.py
+
+---
+
+## Future Improvements
+
+* GUI / web interface
+* Real sensor modeling
+* Configuration system
+* Better visualization of states
+* Integration with real PLC concepts
+
+---
+
+## Notes
+
+This project is not focused on UI or frameworks —
+it is focused on **logic, system behavior, and automation thinking**.
+
+---
+
+## Author
+
+Andrii Dehtiar
+Industrial automation enthusiast / future PLC & QA engineer

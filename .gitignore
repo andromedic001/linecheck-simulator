@@ -1,1 +1,7 @@
 events.jsonl
+.vscode/settings.json
+__pycache__/cascade.cpython-314.pyc
+__pycache__/fsm.cpython-314.pyc
+__pycache__/helpers.cpython-314.pyc
+__pycache__/qa.cpython-314.pyc
+__pycache__/state.cpython-314.pyc
