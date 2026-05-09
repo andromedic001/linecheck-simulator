@@ -22,7 +22,7 @@ This project focuses on **automation logic, system flow, and state control**, si
 * Auto-run mode with configurable flow (max / normal / random)
 * Real-time console HMI (status visualization)
 * Event logging (JSONL format)
-* Fault detection and recovery system
+* Basic fault detection and recovery system
 * Manual control commands for testing scenarios
 
 ---
@@ -38,6 +38,26 @@ project/
 ├── helpers.py       # logging, UI, utilities
 ├── state.py         # system state definition
 └── legacy/          # initial monolithic version
+
+---
+
+## CAD Concept
+
+The project also includes a simplified CAD concept of the simulated production line.
+
+Included concepts:
+* Transport sections
+* Alignment station
+* Clamping mechanism
+* Sensors and actuators
+* Servo-driven aligner concept
+
+The CAD model is intended as a conceptual visualization of the FSM simulation logic, not as a full mechanical engineering design.
+
+Files:
+* docs/FSM_PROJECT.dwg
+* docs/FSM_PROJECT.pdf
+* docs/FSM_PROJECT.png
 
 ---
 
@@ -139,4 +159,4 @@ it is focused on **logic, system behavior, and automation thinking**.
 ## Author
 
 Andrii Dehtiar
-Industrial automation enthusiast / future PLC & QA engineer
+Automation / QA engineering enthusiast
